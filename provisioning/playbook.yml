@@ -1,0 +1,46 @@
+---
+# Offline-safe provisioning: no apt, no package installs, no outbound network.
+# The Wazuh stack itself must already be installed inside the images.
+- name: Common - host resolution for the Wazuh stack
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Pin Wazuh node names in /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} CCRCZP WAZUH NODES"
+        block: |
+          10.10.20.10 wazuh-manager wazuh-manager.lan
+          10.10.20.11 wazuh-indexer wazuh-indexer.lan
+          10.10.20.12 wazuh-dashboard wazuh-dashboard.lan
+
+- name: Indexer - sanity check
+  hosts: wazuh_indexer
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Indexer API reachable on 9200
+      ansible.builtin.command: curl -s -o /dev/null -w '%{http_code}' -k https://10.10.20.11:9200
+      register: idx
+      changed_when: false
+      failed_when: false
+
+    - name: Report indexer status
+      ansible.builtin.debug:
+        msg: "indexer HTTP {{ idx.stdout }} (200 = up, 000 = not listening yet)"
+
+- name: Manager - sanity check
+  hosts: wazuh_manager
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Manager API reachable on 55000
+      ansible.builtin.command: curl -s -o /dev/null -w '%{http_code}' -k https://10.10.20.10:55000
+      register: mgr
+      changed_when: false
+      failed_when: false
+
+    - name: Report manager status
+      ansible.builtin.debug:
+        msg: "manager HTTP {{ mgr.stdout }} (200 = up, 000 = not listening yet)"

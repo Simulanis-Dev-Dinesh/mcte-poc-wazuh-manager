@@ -1,0 +1,31 @@
+# Step 1 of the Phase 6 test order: manager image alone.
+# Proves the image boots, mgmt_user/cloud-init works and Ansible connects,
+# without spending disk and RAM on indexer + dashboard yet.
+name: mcte-poc-wazuh-manager
+hosts:
+  - name: wazuh-manager
+    base_box:
+      image: wazuh-manager
+      mgmt_user: wazuh-user        # VERIFY against the image
+    flavor: wazuh.manager
+routers:
+  - name: edge
+    base_box:
+      image: debian-12-x86_64
+      mgmt_user: debian
+    flavor: standard.small
+wan:
+  name: wan
+  cidr: 100.64.0.0/24
+networks:
+  - name: lan
+    cidr: 10.10.20.0/24
+net_mappings:
+  - host: wazuh-manager
+    network: lan
+    ip: 10.10.20.10
+router_mappings:
+  - router: edge
+    network: lan
+    ip: 10.10.20.1
+groups: []
