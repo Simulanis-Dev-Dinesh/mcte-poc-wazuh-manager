@@ -21,6 +21,5 @@ server.ssl.key: /etc/wazuh-dashboard/certs/dashboard-key.pem
 # (read_guard_modal, multitenancy) and refuses to start. The security plugin
 # is disabled on the indexer for the POC anyway.
 
-newsfeed.enabled: false
-telemetry.optIn: false
-telemetry.enabled: false
+# Deliberately minimal: keys like newsfeed.* and telemetry.* are unknown to this
+# build (their plugins are not installed) and make the dashboard refuse to start.
