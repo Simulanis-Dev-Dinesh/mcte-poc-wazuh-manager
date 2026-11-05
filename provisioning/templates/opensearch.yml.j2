@@ -1,0 +1,28 @@
+# Wazuh indexer configuration, rendered by Ansible (CyberRangeCZ provisioning).
+cluster.name: wazuh-cluster
+node.name: {{ wazuh_indexer_node_name }}
+
+path.data: /var/lib/wazuh-indexer
+path.logs: /var/log/wazuh-indexer
+
+network.host: {{ wazuh_indexer_bind }}
+http.port: 9200
+
+discovery.seed_hosts: ["{{ wazuh_indexer_ip }}"]
+cluster.initial_master_nodes: ["{{ wazuh_indexer_node_name }}"]
+{% if wazuh_indexer_security == 'yes' %}
+
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: /etc/wazuh-indexer/certs/indexer.pem
+plugins.security.ssl.http.pemkey_filepath: /etc/wazuh-indexer/certs/indexer-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: /etc/wazuh-indexer/certs/root-ca.pem
+plugins.security.ssl.transport.pemcert_filepath: /etc/wazuh-indexer/certs/indexer.pem
+plugins.security.ssl.transport.pemkey_filepath: /etc/wazuh-indexer/certs/indexer-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: /etc/wazuh-indexer/certs/root-ca.pem
+plugins.security.ssl.transport.enforce_hostname_verification: false
+{% else %}
+
+# POC: security plugin off so the stack comes up without certificates.
+# Turn it on (wazuh_indexer_security: "yes") once certs are in place.
+plugins.security.disabled: true
+{% endif %}
