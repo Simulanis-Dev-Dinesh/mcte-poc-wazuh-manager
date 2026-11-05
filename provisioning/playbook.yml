@@ -43,6 +43,8 @@
     # "yes" writes a fresh ossec.conf even when one already exists (backup kept).
     # Use it when the config inside the image was wiped or is half-written.
     wazuh_force_ossec_conf: "yes"
+    # "yes" enables agent enrollment (needs etc/sslmanager.cert/.key in the image)
+    wazuh_auth_enabled: "no"
     wazuh_home: /var/ossec
     ossec_conf: /var/ossec/etc/ossec.conf
   tasks:
