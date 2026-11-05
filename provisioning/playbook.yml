@@ -1,46 +1,384 @@
 ---
-# Offline-safe provisioning: no apt, no package installs, no outbound network.
-# The Wazuh stack itself must already be installed inside the images.
-- name: Common - host resolution for the Wazuh stack
+# CyberRangeCZ provisioning for the Wazuh stack (manager + dashboard).
+#
+# Runs over SSH as mgmt_user (crczp) with sudo. Offline-safe: no apt, no package
+# installs, no outbound network. Wazuh must already be installed in the images.
+#
+# One file, three plays. Hosts are selected by their inventory name, so the same
+# playbook works for the manager-only definition and for the three-node one:
+#   wazuh-manager*   -> ossec.conf, wazuh-manager service
+#   wazuh-dashboard* -> opensearch_dashboards.yml, wazuh-dashboard service
+#   anything else    -> skipped by the first task of the play
+
+- name: Common - host resolution
   hosts: all
-  gather_facts: false
+  gather_facts: true
   become: true
+  vars:
+    wazuh_nodes:
+      - { ip: "10.10.20.10", name: "wazuh-manager" }
+      - { ip: "10.10.20.11", name: "wazuh-indexer" }
+      - { ip: "10.10.20.12", name: "wazuh-dashboard" }
   tasks:
     - name: Pin Wazuh node names in /etc/hosts
       ansible.builtin.blockinfile:
         path: /etc/hosts
-        marker: "# {mark} CCRCZP WAZUH NODES"
+        marker: "# {mark} CRCZP WAZUH NODES"
         block: |
-          10.10.20.10 wazuh-manager wazuh-manager.lan
-          10.10.20.11 wazuh-indexer wazuh-indexer.lan
-          10.10.20.12 wazuh-dashboard wazuh-dashboard.lan
+          {% for n in wazuh_nodes %}
+          {{ n.ip }} {{ n.name }} {{ n.name }}.lan
+          {% endfor %}
 
-- name: Indexer - sanity check
-  hosts: wazuh_indexer
-  gather_facts: false
+
+- name: Wazuh manager
+  hosts: all
+  gather_facts: true
   become: true
+  vars:
+    wazuh_manager_ip: "10.10.20.10"
+    wazuh_indexer_ip: "10.10.20.11"
+    wazuh_node_name: "wazuh-manager"
+    # 'yes' only once the indexer exists and its certificates are on this node.
+    wazuh_indexer_enabled: "no"
+    # "yes" writes a fresh ossec.conf even when one already exists (backup kept).
+    # Use it when the config inside the image was wiped or is half-written.
+    wazuh_force_ossec_conf: "yes"
+    wazuh_home: /var/ossec
+    ossec_conf: /var/ossec/etc/ossec.conf
   tasks:
-    - name: Indexer API reachable on 9200
-      ansible.builtin.command: curl -s -o /dev/null -w '%{http_code}' -k https://10.10.20.11:9200
-      register: idx
+    - name: Skip hosts that are not the manager
+      ansible.builtin.meta: end_host
+      when: not inventory_hostname.startswith('wazuh-manager')
+
+    - name: Is Wazuh installed in this image
+      ansible.builtin.stat:
+        path: "{{ wazuh_home }}/bin/wazuh-control"
+      register: wazuh_control
+
+    - name: Stop here if Wazuh is not installed
+      ansible.builtin.fail:
+        msg: >-
+          Wazuh is not installed in this image ({{ wazuh_home }}/bin/wazuh-control
+          not found). Install Wazuh in the base image, or rebuild it.
+      when: not wazuh_control.stat.exists
+
+    - name: Read the installed Wazuh version
+      ansible.builtin.command: "{{ wazuh_home }}/bin/wazuh-control info"
+      register: wazuh_info
       changed_when: false
       failed_when: false
 
-    - name: Report indexer status
+    - name: Show version
       ansible.builtin.debug:
-        msg: "indexer HTTP {{ idx.stdout }} (200 = up, 000 = not listening yet)"
+        msg: "{{ wazuh_info.stdout_lines | default(['(version unknown)']) }}"
 
-- name: Manager - sanity check
-  hosts: wazuh_manager
-  gather_facts: false
-  become: true
-  tasks:
-    - name: Manager API reachable on 55000
-      ansible.builtin.command: curl -s -o /dev/null -w '%{http_code}' -k https://10.10.20.10:55000
-      register: mgr
+    - name: Does an ossec.conf already exist
+      ansible.builtin.stat:
+        path: "{{ ossec_conf }}"
+      register: conf_stat
+
+    - name: Back up the existing ossec.conf
+      ansible.builtin.copy:
+        src: "{{ ossec_conf }}"
+        dest: "{{ ossec_conf }}.bak-crczp"
+        remote_src: true
+        mode: "0600"
+      when: conf_stat.stat.exists and conf_stat.stat.size > 0
+
+    - name: Render ossec.conf (only when missing or empty)
+      ansible.builtin.template:
+        src: templates/ossec.conf.j2
+        dest: "{{ ossec_conf }}"
+        owner: root
+        group: wazuh
+        mode: "0640"
+      vars:
+        wazuh_cluster_key: "{{ lookup('password', '/dev/null length=32 chars=hexdigits') }}"
+      when: wazuh_force_ossec_conf == 'yes' or (not conf_stat.stat.exists) or (conf_stat.stat.size == 0)
+      register: conf_rendered
+
+    - name: Note when an existing config was left in place
+      ansible.builtin.debug:
+        msg: >-
+          Existing {{ ossec_conf }} kept as-is (backup: {{ ossec_conf }}.bak-crczp).
+          Delete the file and re-run to let this playbook write a fresh one.
+      when: not conf_rendered.changed
+
+    - name: Validate the manager configuration
+      ansible.builtin.command: "{{ wazuh_home }}/bin/wazuh-analysisd -t"
+      register: conf_check
       changed_when: false
       failed_when: false
 
-    - name: Report manager status
+    - name: Report an invalid configuration
       ansible.builtin.debug:
-        msg: "manager HTTP {{ mgr.stdout }} (200 = up, 000 = not listening yet)"
+        msg: "{{ conf_check.stdout_lines | default([]) + conf_check.stderr_lines | default([]) }}"
+      when: conf_check.rc != 0
+
+    - name: Enable and start wazuh-manager
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        enabled: true
+        state: restarted
+        daemon_reload: true
+      failed_when: false
+
+    - name: Wait for the manager API port
+      ansible.builtin.wait_for:
+        port: 55000
+        host: 127.0.0.1
+        timeout: 60
+      failed_when: false
+
+    - name: Manager status
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "unit: $(systemctl is-active wazuh-manager 2>/dev/null)"
+        echo "--- listening ---"
+        ss -ltnp 2>/dev/null | grep -E ':(1514|1515|1516|55000)\b' || echo "no wazuh ports listening"
+      args:
+        executable: /bin/bash
+      register: mgr_status
+      changed_when: false
+      failed_when: false
+
+    - name: Show manager status
+      ansible.builtin.debug:
+        msg: "{{ mgr_status.stdout_lines | default([]) }}"
+
+    - name: Fail the stage when the manager did not come up
+      ansible.builtin.fail:
+        msg: >-
+          wazuh-manager is not running. Check /var/ossec/logs/ossec.log inside the
+          node. Common causes: ossec.conf validation errors, missing certificates,
+          or the indexer section enabled while the indexer does not exist yet.
+      when: "'unit: active' not in mgr_status.stdout"
+
+
+- name: Wazuh indexer
+  hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    wazuh_indexer_ip: "10.10.20.11"
+    wazuh_indexer_node_name: "wazuh-indexer"
+    wazuh_indexer_bind: "0.0.0.0"
+    wazuh_indexer_home: /usr/share/wazuh-indexer
+    wazuh_indexer_conf: /etc/wazuh-indexer/opensearch.yml
+    # "no" runs the indexer without the security plugin (no certificates needed).
+    # Set "yes" only after the certificates are on the node.
+    wazuh_indexer_security: "no"
+    wazuh_force_indexer_conf: "yes"
+  tasks:
+    - name: Skip hosts that are not the indexer
+      ansible.builtin.meta: end_host
+      when: not inventory_hostname.startswith('wazuh-indexer')
+
+    - name: Is the indexer installed in this image
+      ansible.builtin.stat:
+        path: "{{ wazuh_indexer_home }}"
+      register: idx_home
+
+    - name: Stop here if the indexer is not installed
+      ansible.builtin.fail:
+        msg: >-
+          Wazuh indexer is not installed in this image ({{ wazuh_indexer_home }}
+          not found). Install it in the base image, or rebuild it.
+      when: not idx_home.stat.exists
+
+    - name: Does an opensearch.yml already exist
+      ansible.builtin.stat:
+        path: "{{ wazuh_indexer_conf }}"
+      register: idx_conf
+
+    - name: Back up the existing opensearch.yml
+      ansible.builtin.copy:
+        src: "{{ wazuh_indexer_conf }}"
+        dest: "{{ wazuh_indexer_conf }}.bak-crczp"
+        remote_src: true
+        mode: "0600"
+      when: idx_conf.stat.exists and idx_conf.stat.size > 0
+
+    - name: Render opensearch.yml
+      ansible.builtin.template:
+        src: templates/opensearch.yml.j2
+        dest: "{{ wazuh_indexer_conf }}"
+        owner: wazuh-indexer
+        group: wazuh-indexer
+        mode: "0660"
+      when: wazuh_force_indexer_conf == 'yes' or (not idx_conf.stat.exists) or (idx_conf.stat.size == 0)
+
+    - name: Make sure the data and log directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: wazuh-indexer
+        group: wazuh-indexer
+        mode: "0750"
+      loop:
+        - /var/lib/wazuh-indexer
+        - /var/log/wazuh-indexer
+      failed_when: false
+
+    - name: Enable and start wazuh-indexer
+      ansible.builtin.systemd:
+        name: wazuh-indexer
+        enabled: true
+        state: restarted
+        daemon_reload: true
+      failed_when: false
+
+    - name: Wait for the indexer port
+      ansible.builtin.wait_for:
+        port: 9200
+        host: 127.0.0.1
+        timeout: 180
+      failed_when: false
+
+    - name: Indexer status
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "unit: $(systemctl is-active wazuh-indexer 2>/dev/null)"
+        echo "--- listening ---"
+        ss -ltnp 2>/dev/null | grep -E ':9200\b' || echo "port 9200 not listening"
+      args:
+        executable: /bin/bash
+      register: idx_status
+      changed_when: false
+      failed_when: false
+
+    - name: Show indexer status
+      ansible.builtin.debug:
+        msg: "{{ idx_status.stdout_lines | default([]) }}"
+
+    - name: Fail the stage when the indexer did not come up
+      ansible.builtin.fail:
+        msg: >-
+          wazuh-indexer is not running. Check /var/log/wazuh-indexer/wazuh-indexer.log.
+          Common causes: opensearch.yml errors, heap too large for the flavor RAM,
+          or the security plugin enabled while certificates are missing.
+      when: "'unit: active' not in idx_status.stdout"
+
+
+- name: Wazuh dashboard
+  hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    wazuh_manager_ip: "10.10.20.10"
+    wazuh_indexer_ip: "10.10.20.11"
+    wazuh_node_name: "wazuh-dashboard"
+    wazuh_dashboard_home: /etc/wazuh-dashboard
+    wazuh_dashboard_conf: /etc/wazuh-dashboard/opensearch_dashboards.yml
+    wazuh_api_conf: /usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
+    # Plain HTTP on 5601 so the dashboard starts without certificates.
+    # Set 'yes' once the indexer certificates are on this node to serve HTTPS.
+    wazuh_dashboard_ssl: "no"
+    wazuh_dashboard_port: 5601
+    wazuh_dashboard_indexer_user: "kibanaserver"
+    wazuh_dashboard_indexer_password: "kibanaserver"
+    wazuh_dashboard_ssl_verify: none
+    # Must match the indexer: "no" while the indexer runs without its security
+    # plugin (plain HTTP, no credentials), "yes" once certificates are in place.
+    wazuh_dashboard_indexer_security: "no"
+    wazuh_dashboard_indexer_url: "{{ 'https' if wazuh_dashboard_indexer_security == 'yes' else 'http' }}://{{ wazuh_indexer_ip }}:9200"
+    # "yes" writes a fresh dashboard config even when one already exists.
+    wazuh_force_dashboard_conf: "yes"
+    # Credentials of the manager API, used by the Wazuh app in the dashboard.
+    wazuh_api_user: "wazuh"
+    wazuh_api_password: "wazuh"
+  tasks:
+    - name: Skip hosts that are not the dashboard
+      ansible.builtin.meta: end_host
+      when: not inventory_hostname.startswith('wazuh-dashboard')
+
+    - name: Is the dashboard installed in this image
+      ansible.builtin.stat:
+        path: "{{ wazuh_dashboard_home }}"
+      register: dash_home
+
+    - name: Stop here if the dashboard is not installed
+      ansible.builtin.fail:
+        msg: >-
+          Wazuh dashboard is not installed in this image ({{ wazuh_dashboard_home }}
+          not found). Install it in the base image, or rebuild it.
+      when: not dash_home.stat.exists
+
+    - name: Does a dashboard config already exist
+      ansible.builtin.stat:
+        path: "{{ wazuh_dashboard_conf }}"
+      register: dash_conf
+
+    - name: Back up the existing dashboard config
+      ansible.builtin.copy:
+        src: "{{ wazuh_dashboard_conf }}"
+        dest: "{{ wazuh_dashboard_conf }}.bak-crczp"
+        remote_src: true
+        mode: "0600"
+      when: dash_conf.stat.exists and dash_conf.stat.size > 0
+
+    - name: Render opensearch_dashboards.yml (only when missing or empty)
+      ansible.builtin.template:
+        src: templates/opensearch_dashboards.yml.j2
+        dest: "{{ wazuh_dashboard_conf }}"
+        owner: wazuh-dashboard
+        group: wazuh-dashboard
+        mode: "0640"
+      when: wazuh_force_dashboard_conf == 'yes' or (not dash_conf.stat.exists) or (dash_conf.stat.size == 0)
+      register: dash_rendered
+
+    - name: Note when an existing dashboard config was left in place
+      ansible.builtin.debug:
+        msg: >-
+          Existing {{ wazuh_dashboard_conf }} kept as-is
+          (backup: {{ wazuh_dashboard_conf }}.bak-crczp).
+      when: not dash_rendered.changed
+
+    - name: Point the Wazuh app at the manager API
+      ansible.builtin.template:
+        src: templates/wazuh_api.yml.j2
+        dest: "{{ wazuh_api_conf }}"
+        owner: wazuh-dashboard
+        group: wazuh-dashboard
+        mode: "0640"
+      failed_when: false
+
+    - name: Enable and start wazuh-dashboard
+      ansible.builtin.systemd:
+        name: wazuh-dashboard
+        enabled: true
+        state: restarted
+        daemon_reload: true
+      failed_when: false
+
+    - name: Wait for the dashboard port
+      ansible.builtin.wait_for:
+        port: "{{ wazuh_dashboard_port }}"
+        host: 127.0.0.1
+        timeout: 120
+      failed_when: false
+
+    - name: Dashboard status
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "unit: $(systemctl is-active wazuh-dashboard 2>/dev/null)"
+        echo "--- listening ---"
+        ss -ltnp 2>/dev/null | grep -E ':{{ wazuh_dashboard_port }}\b' || echo "port {{ wazuh_dashboard_port }} not listening"
+      args:
+        executable: /bin/bash
+      register: dash_status
+      changed_when: false
+      failed_when: false
+
+    - name: Show dashboard status
+      ansible.builtin.debug:
+        msg: "{{ dash_status.stdout_lines | default([]) }}"
+
+    - name: Fail the stage when the dashboard did not come up
+      ansible.builtin.fail:
+        msg: >-
+          wazuh-dashboard is not running. Check
+          /var/log/wazuh-dashboard/wazuh-dashboard.log inside the node. Common
+          causes: the indexer is not reachable, wrong indexer credentials, or
+          certificates enabled while they are missing.
+      when: "'unit: active' not in dash_status.stdout"
