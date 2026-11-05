@@ -17,9 +17,9 @@ server.ssl.certificate: /etc/wazuh-dashboard/certs/dashboard.pem
 server.ssl.key: /etc/wazuh-dashboard/certs/dashboard-key.pem
 {% endif %}
 
-opensearch_security.multitenancy.enabled: true
-opensearch_security.multitenancy.tenants.preferred: ["Global", "Private"]
-opensearch_security.read_guard_modal: true
+# No opensearch_security.* keys: this dashboard version rejects some of them
+# (read_guard_modal, multitenancy) and refuses to start. The security plugin
+# is disabled on the indexer for the POC anyway.
 
 newsfeed.enabled: false
 telemetry.optIn: false
