@@ -115,6 +115,25 @@
         msg: "{{ conf_check.stdout_lines | default([]) + conf_check.stderr_lines | default([]) }}"
       when: conf_check.rc != 0
 
+    - name: Allow the manager a long start (rules take time on a slow disk)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/wazuh-manager.service.d/timeout.conf
+        content: |
+          [Service]
+          TimeoutStartSec=600
+          TimeoutStopSec=300
+        owner: root
+        group: root
+        mode: "0644"
+      failed_when: false
+
+    - name: Clear any previous failed state
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        daemon_reload: true
+        state: stopped
+      failed_when: false
+
     - name: Enable and start wazuh-manager
       ansible.builtin.systemd:
         name: wazuh-manager
@@ -127,7 +146,7 @@
       ansible.builtin.wait_for:
         port: 55000
         host: 127.0.0.1
-        timeout: 60
+        timeout: 300
       failed_when: false
 
     - name: Manager status
@@ -146,13 +165,16 @@
       ansible.builtin.debug:
         msg: "{{ mgr_status.stdout_lines | default([]) }}"
 
-    - name: Fail the stage when the manager did not come up
+    - name: Fail the stage when the manager is neither active nor listening
       ansible.builtin.fail:
         msg: >-
-          wazuh-manager is not running. Check /var/ossec/logs/ossec.log inside the
-          node. Common causes: ossec.conf validation errors, missing certificates,
-          or the indexer section enabled while the indexer does not exist yet.
-      when: "'unit: active' not in mgr_status.stdout"
+          wazuh-manager is not running and nothing listens on its ports. Check
+          /var/ossec/logs/ossec.log inside the node. Common causes: ossec.conf
+          validation errors, missing certificates, or the indexer section enabled
+          while the indexer does not exist yet.
+      when:
+        - "'unit: active' not in mgr_status.stdout"
+        - "'LISTEN' not in mgr_status.stdout"
 
 
 - name: Wazuh indexer
@@ -220,6 +242,18 @@
         - /var/log/wazuh-indexer
       failed_when: false
 
+    - name: Allow the indexer a long start
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/wazuh-indexer.service.d/timeout.conf
+        content: |
+          [Service]
+          TimeoutStartSec=600
+          TimeoutStopSec=300
+        owner: root
+        group: root
+        mode: "0644"
+      failed_when: false
+
     - name: Enable and start wazuh-indexer
       ansible.builtin.systemd:
         name: wazuh-indexer
@@ -257,7 +291,9 @@
           wazuh-indexer is not running. Check /var/log/wazuh-indexer/wazuh-indexer.log.
           Common causes: opensearch.yml errors, heap too large for the flavor RAM,
           or the security plugin enabled while certificates are missing.
-      when: "'unit: active' not in idx_status.stdout"
+      when:
+        - "'unit: active' not in idx_status.stdout"
+        - "'LISTEN' not in idx_status.stdout"
 
 
 - name: Wazuh dashboard
@@ -381,4 +417,6 @@
           /var/log/wazuh-dashboard/wazuh-dashboard.log inside the node. Common
           causes: the indexer is not reachable, wrong indexer credentials, or
           certificates enabled while they are missing.
-      when: "'unit: active' not in dash_status.stdout"
+      when:
+        - "'unit: active' not in dash_status.stdout"
+        - "'LISTEN' not in dash_status.stdout"
