@@ -341,7 +341,7 @@
     wazuh_force_dashboard_conf: "yes"
     # Credentials of the manager API, used by the Wazuh app in the dashboard.
     wazuh_api_user: "wazuh"
-    wazuh_api_password: "wazuh"
+    wazuh_api_password: "Wazuh.123"
   tasks:
     - name: Skip hosts that are not the dashboard
       ansible.builtin.meta: end_host
@@ -439,3 +439,198 @@
       when:
         - "'unit: active' not in dash_status.stdout"
         - "'LISTEN' not in dash_status.stdout"
+
+- name: Wazuh security - certificates, indexer security, API credentials
+  hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    wazuh_home: /var/ossec
+    wazuh_indexer_tools: /usr/share/wazuh-indexer/plugins/opensearch-security/tools
+    wazuh_indexer_certs: /etc/wazuh-indexer/certs
+    wazuh_indexer_securityconf: /etc/wazuh-indexer/opensearch-security
+    wazuh_dashboard_certs: /etc/wazuh-dashboard/certs
+    wazuh_dashboard_conf: /etc/wazuh-dashboard/opensearch_dashboards.yml
+    wazuh_api_conf: /usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
+    wazuh_manager_ip: "10.10.20.10"
+    wazuh_indexer_ip: "10.10.20.11"
+    # POC passwords. Change them for anything beyond a demo.
+    wazuh_admin_password: "Admin.123"
+    wazuh_api_password: "Wazuh.123"
+    wazuh_force_security: "yes"
+  tasks:
+    - name: Indexer - generate the certificates (Wazuh certs tool)
+      ansible.builtin.shell: |
+        set -e
+        cd {{ wazuh_indexer_tools }}
+        cat > config.yml <<'CFG'
+        nodes:
+          indexer:
+            - name: wazuh-indexer
+              ip: "{{ wazuh_indexer_ip }}"
+          server:
+            - name: wazuh-manager
+              ip: "{{ wazuh_manager_ip }}"
+          dashboard:
+            - name: wazuh-dashboard
+              ip: "{{ hostvars[groups['wazuh_dashboard'][0]]['ansible_host'] | default('10.10.20.12') }}"
+        CFG
+        rm -rf wazuh-certificates
+        bash ./wazuh-certs-tool.sh -A
+      args:
+        executable: /bin/bash
+      when: inventory_hostname.startswith('wazuh-indexer')
+      failed_when: false
+
+    - name: Indexer - install its own certificates
+      ansible.builtin.shell: |
+        set -e
+        T={{ wazuh_indexer_tools }}/wazuh-certificates
+        I={{ wazuh_indexer_certs }}
+        mkdir -p "$I"
+        for f in wazuh-indexer.pem wazuh-indexer-key.pem root-ca.pem admin.pem admin-key.pem; do
+          install -o wazuh-indexer -g wazuh-indexer -m 500 "$T/$f" "$I/$f"
+        done
+      args:
+        executable: /bin/bash
+      when: inventory_hostname.startswith('wazuh-indexer')
+      failed_when: false
+
+    - name: Indexer - turn the security plugin on in opensearch.yml
+      ansible.builtin.shell: |
+        set -e
+        CONF=/etc/wazuh-indexer/opensearch.yml
+        sed -i '/^plugins.security.disabled/d' "$CONF"
+        if ! grep -q 'plugins.security.ssl.http.enabled' "$CONF"; then
+          cat >> "$CONF" <<'CFG'
+        plugins.security.ssl.http.enabled: true
+        plugins.security.ssl.http.pemcert_filepath: /etc/wazuh-indexer/certs/wazuh-indexer.pem
+        plugins.security.ssl.http.pemkey_filepath: /etc/wazuh-indexer/certs/wazuh-indexer-key.pem
+        plugins.security.ssl.http.pemtrustedcas_filepath: /etc/wazuh-indexer/certs/root-ca.pem
+        plugins.security.ssl.transport.pemcert_filepath: /etc/wazuh-indexer/certs/wazuh-indexer.pem
+        plugins.security.ssl.transport.pemkey_filepath: /etc/wazuh-indexer/certs/wazuh-indexer-key.pem
+        plugins.security.ssl.transport.pemtrustedcas_filepath: /etc/wazuh-indexer/certs/root-ca.pem
+        plugins.security.ssl.transport.enforce_hostname_verification: false
+        plugins.security.allow_default_init_securityindex: true
+        plugins.security.authcz.admin_dn:
+          - CN=admin,OU=Wazuh,O=Wazuh,L=California,C=US
+        plugins.security.nodes_dn:
+          - CN=wazuh-indexer,OU=Wazuh,O=Wazuh,L=California,C=US
+          - CN=wazuh-dashboard,OU=Wazuh,O=Wazuh,L=California,C=US
+        plugins.security.audit.type: internal_opensearch
+        plugins.security.restapi.roles_enabled: ["all_access", "security_rest_api_access"]
+        plugins.security.system_indices.enabled: true
+        CFG
+        fi
+      args:
+        executable: /bin/bash
+      when:
+        - inventory_hostname.startswith('wazuh-indexer')
+        - wazuh_force_security == 'yes'
+      changed_when: false
+      failed_when: false
+
+    - name: Indexer - restart with security on
+      ansible.builtin.systemd:
+        name: wazuh-indexer
+        state: restarted
+        daemon_reload: true
+      when:
+        - inventory_hostname.startswith('wazuh-indexer')
+        - wazuh_force_security == 'yes'
+      failed_when: false
+
+    - name: Indexer - wait for 9200
+      ansible.builtin.wait_for:
+        port: 9200
+        host: 127.0.0.1
+        timeout: 300
+      when: inventory_hostname.startswith('wazuh-indexer')
+      failed_when: false
+
+    - name: Indexer - load the security configuration
+      ansible.builtin.shell: |
+        set -o pipefail
+        cd {{ wazuh_indexer_tools }}
+        ./securityadmin.sh -cd {{ wazuh_indexer_securityconf }} -icl -nhnv \
+          -cacert {{ wazuh_indexer_certs }}/root-ca.pem \
+          -cert {{ wazuh_indexer_certs }}/admin.pem \
+          -key {{ wazuh_indexer_certs }}/admin-key.pem -h 127.0.0.1 2>&1 | tail -5
+      args:
+        executable: /bin/bash
+      when: inventory_hostname.startswith('wazuh-indexer')
+      changed_when: false
+      failed_when: false
+
+    - name: Indexer - set the admin password
+      ansible.builtin.shell: |
+        cd {{ wazuh_indexer_tools }}
+        ./wazuh-passwords-tool.sh -u admin -p '{{ wazuh_admin_password }}' 2>&1 | tail -3
+      args:
+        executable: /bin/bash
+      when: inventory_hostname.startswith('wazuh-indexer')
+      changed_when: false
+      failed_when: false
+
+    - name: Dashboard - fetch its certificates from the indexer
+      ansible.builtin.fetch:
+        src: "{{ wazuh_indexer_tools }}/wazuh-certificates/{{ item }}"
+        dest: "/tmp/crczp-certs/"
+        flat: true
+      delegate_to: "{{ groups['wazuh_indexer'][0] }}"
+      loop:
+        - wazuh-dashboard.pem
+        - wazuh-dashboard-key.pem
+        - root-ca.pem
+      when:
+        - inventory_hostname.startswith('wazuh-dashboard')
+        - groups['wazuh_indexer'] | default([]) | length > 0
+      failed_when: false
+
+    - name: Dashboard - install the certificates
+      ansible.builtin.copy:
+        src: "/tmp/crczp-certs/{{ item }}"
+        dest: "{{ wazuh_dashboard_certs }}/{{ item }}"
+        owner: wazuh-dashboard
+        group: wazuh-dashboard
+        mode: "0500"
+      loop:
+        - wazuh-dashboard.pem
+        - wazuh-dashboard-key.pem
+        - root-ca.pem
+      when:
+        - inventory_hostname.startswith('wazuh-dashboard')
+        - groups['wazuh_indexer'] | default([]) | length > 0
+      failed_when: false
+
+    - name: Dashboard - restart on HTTPS with indexer credentials
+      ansible.builtin.systemd:
+        name: wazuh-dashboard
+        state: restarted
+      when: inventory_hostname.startswith('wazuh-dashboard')
+      failed_when: false
+
+    - name: Manager - set the API user password (werkzeug scrypt)
+      ansible.builtin.shell: |
+        set -e
+        {{ wazuh_home }}/framework/python/bin/python3 - <<'PY'
+        import sqlite3
+        from werkzeug.security import generate_password_hash
+        h = generate_password_hash('{{ wazuh_api_password }}', method='scrypt:32768:8:1')
+        c = sqlite3.connect('/var/ossec/api/configuration/security/rbac.db')
+        c.execute('update users set password=? where username=?', (h, 'wazuh'))
+        c.commit()
+        print('api password updated:', c.total_changes)
+        PY
+      args:
+        executable: /bin/bash
+      when: inventory_hostname.startswith('wazuh-manager')
+      changed_when: false
+      failed_when: false
+
+    - name: Manager - restart so the API picks the new hash up
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        state: restarted
+      when: inventory_hostname.startswith('wazuh-manager')
+      failed_when: false
