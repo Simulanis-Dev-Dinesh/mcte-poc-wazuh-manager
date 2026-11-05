@@ -43,9 +43,9 @@ router_mappings:
     network: lan
     ip: 10.10.20.1
 groups:
-  - name: wazuh_manager
+  - name: wazuh-manager
     nodes: [wazuh-manager]
-  - name: wazuh_indexer
+  - name: wazuh-indexer
     nodes: [wazuh-indexer]
-  - name: wazuh_dashboard
+  - name: wazuh-dashboard
     nodes: [wazuh-dashboard]
