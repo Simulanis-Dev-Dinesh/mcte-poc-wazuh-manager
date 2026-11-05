@@ -1,0 +1,8 @@
+# Wazuh app -> Wazuh manager API, rendered by Ansible.
+hosts:
+  - {{ wazuh_node_name }}:
+      url: https://{{ wazuh_manager_ip }}
+      port: 55000
+      username: {{ wazuh_api_user }}
+      password: {{ wazuh_api_password }}
+      run_as: false
