@@ -106,14 +106,18 @@
           Delete the file and re-run to let this playbook write a fresh one.
       when: not conf_rendered.changed
 
-    - name: Recreate the Wazuh queue directories
+    - name: Recreate the Wazuh queue, log and stats directories
       ansible.builtin.shell: |
         set -e
-        for d in alerts cluster db diff fim/db fim/sync logcollector rids sockets syscheck agent-groups; do
-          mkdir -p "{{ wazuh_home }}/queue/$d"
+        for d in logs/alerts logs/archives logs/firewall logs/cluster \
+                 queue/alerts queue/cluster queue/db queue/diff queue/fim/db queue/fim/sync \
+                 queue/fts queue/logcollector queue/rids queue/sockets queue/syscheck \
+                 queue/tasks queue/agent-groups queue/router stats; do
+          mkdir -p "{{ wazuh_home }}/$d"
         done
-        chown -R wazuh:wazuh "{{ wazuh_home }}/queue"
-        chmod -R 750 "{{ wazuh_home }}/queue"
+        touch "{{ wazuh_home }}/queue/fts/hostinfo"
+        chown -R wazuh:wazuh "{{ wazuh_home }}/logs" "{{ wazuh_home }}/queue" "{{ wazuh_home }}/stats"
+        chmod -R 750 "{{ wazuh_home }}/logs" "{{ wazuh_home }}/queue" "{{ wazuh_home }}/stats"
       args:
         executable: /bin/bash
       changed_when: false
