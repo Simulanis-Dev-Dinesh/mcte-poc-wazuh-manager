@@ -88,7 +88,9 @@
   </ruleset>
 
   <auth>
-    <disabled>no</disabled>
+    <!-- POC: agent enrollment off. Enabling it needs etc/sslmanager.cert and
+         etc/sslmanager.key inside the image, otherwise wazuh-authd exits. -->
+    <disabled>{{ wazuh_auth_enabled }}</disabled>
     <port>1515</port>
     <use_source_ip>no</use_source_ip>
     <purge>yes</purge>
