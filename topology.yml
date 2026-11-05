@@ -5,8 +5,8 @@ name: mcte-poc-wazuh-manager
 hosts:
   - name: wazuh-manager
     base_box:
-      image: wazuh-manager
-      mgmt_user: wazuh-user        # VERIFY against the image
+      image: wazuh-manager-ci
+      mgmt_user: crczp        # VERIFY against the image
     flavor: wazuh.manager
 routers:
   - name: edge
