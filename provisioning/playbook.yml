@@ -541,6 +541,11 @@
         plugins.security.system_indices.enabled: true
         CFG
         fi
+        # Filebeat 7.10 (shipped with Wazuh 4.x) refuses to talk to a cluster that
+        # reports a 2.x version: it adds _type to every bulk request and the
+        # indexer rejects it. This makes the main endpoint answer 7.10.2.
+        grep -q 'compatibility.override_main_response_version' "$CONF" || \
+          echo 'compatibility.override_main_response_version: true' >> "$CONF"
       args:
         executable: /bin/bash
       when:
@@ -668,6 +673,74 @@
         executable: /bin/bash
       when: inventory_hostname.startswith('wazuh-manager')
       changed_when: false
+      failed_when: false
+
+    - name: Manager - read the indexer CA
+      ansible.builtin.slurp:
+        src: /etc/wazuh-indexer/certs/root-ca.pem
+      delegate_to: "wazuh-indexer"
+      register: indexer_ca
+      when:
+        - inventory_hostname.startswith('wazuh-manager')
+        - "'wazuh-indexer' in groups['all']"
+      failed_when: false
+
+    - name: Manager - install the CA for filebeat
+      ansible.builtin.copy:
+        content: "{{ indexer_ca.content | b64decode }}"
+        dest: /etc/filebeat/certs/root-ca.pem
+        owner: root
+        group: root
+        mode: "0644"
+      when:
+        - inventory_hostname.startswith('wazuh-manager')
+        - indexer_ca.content is defined
+      failed_when: false
+
+    - name: Manager - filebeat ships alerts to the indexer
+      ansible.builtin.copy:
+        dest: /etc/filebeat/filebeat.yml
+        content: |
+          output.elasticsearch:
+            hosts: ["{{ wazuh_indexer_ip }}:9200"]
+            protocol: https
+            username: "admin"
+            password: "{{ wazuh_admin_password }}"
+            ssl.certificate_authorities:
+              - /etc/filebeat/certs/root-ca.pem
+
+          setup.ilm.enabled: false
+          setup.template.json.enabled: true
+          setup.template.json.path: "/etc/filebeat/wazuh-template.json"
+          setup.template.json.name: "wazuh"
+          setup.template.overwrite: false
+
+          filebeat.modules:
+            - module: wazuh
+              alerts:
+                enabled: true
+              archives:
+                enabled: false
+
+          logging.level: info
+          logging.to_files: true
+          logging.files:
+            path: /var/log/filebeat
+            name: filebeat
+            keepfiles: 7
+            permissions: 0644
+        owner: root
+        group: root
+        mode: "0600"
+      when: inventory_hostname.startswith('wazuh-manager')
+      failed_when: false
+
+    - name: Manager - enable filebeat
+      ansible.builtin.systemd:
+        name: filebeat
+        enabled: true
+        state: restarted
+      when: inventory_hostname.startswith('wazuh-manager')
       failed_when: false
 
     - name: Manager - clear the failed state
