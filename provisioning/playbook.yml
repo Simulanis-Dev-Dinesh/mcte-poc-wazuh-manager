@@ -651,9 +651,49 @@
       changed_when: false
       failed_when: false
 
+    - name: Manager - clear the failed state
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        daemon_reload: true
+        state: stopped
+      when: inventory_hostname.startswith('wazuh-manager')
+      failed_when: false
+
     - name: Manager - restart so the API picks the new hash up
       ansible.builtin.systemd:
         name: wazuh-manager
         state: restarted
       when: inventory_hostname.startswith('wazuh-manager')
       failed_when: false
+
+    - name: Manager - wait for the API port
+      ansible.builtin.wait_for:
+        port: 55000
+        host: 127.0.0.1
+        timeout: 300
+      when: inventory_hostname.startswith('wazuh-manager')
+      failed_when: false
+
+    - name: Manager - start it again if the restart timed out
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        state: started
+      when: inventory_hostname.startswith('wazuh-manager')
+      failed_when: false
+
+    - name: Manager - report the daemons
+      ansible.builtin.shell: |
+        set -o pipefail
+        systemctl is-active wazuh-manager
+        /var/ossec/bin/wazuh-control status | head -6
+      args:
+        executable: /bin/bash
+      register: mgr_final
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname.startswith('wazuh-manager')
+
+    - name: Manager - show the daemons
+      ansible.builtin.debug:
+        msg: "{{ mgr_final.stdout_lines | default([]) }}"
+      when: inventory_hostname.startswith('wazuh-manager')
