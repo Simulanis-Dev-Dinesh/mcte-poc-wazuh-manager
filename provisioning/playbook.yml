@@ -44,7 +44,8 @@
     # Use it when the config inside the image was wiped or is half-written.
     wazuh_force_ossec_conf: "yes"
     # "yes" enables agent enrollment (needs etc/sslmanager.cert/.key in the image)
-    wazuh_auth_enabled: "no"
+    # Agent enrollment is off: the image has no etc/sslmanager.cert/.key
+    wazuh_authd_disabled: "yes"
     wazuh_home: /var/ossec
     ossec_conf: /var/ossec/etc/ossec.conf
   tasks:
@@ -133,6 +134,15 @@
       ansible.builtin.debug:
         msg: "{{ conf_check.stdout_lines | default([]) + conf_check.stderr_lines | default([]) }}"
       when: conf_check.rc != 0
+
+    - name: Create the manager drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/wazuh-manager.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      failed_when: false
 
     - name: Allow the manager a long start (rules take time on a slow disk)
       ansible.builtin.copy:
@@ -259,6 +269,15 @@
       loop:
         - /var/lib/wazuh-indexer
         - /var/log/wazuh-indexer
+      failed_when: false
+
+    - name: Create the indexer drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/wazuh-indexer.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
       failed_when: false
 
     - name: Allow the indexer a long start
