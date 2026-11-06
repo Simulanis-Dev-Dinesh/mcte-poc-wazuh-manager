@@ -473,7 +473,7 @@
               ip: "{{ wazuh_manager_ip }}"
           dashboard:
             - name: wazuh-dashboard
-              ip: "{{ hostvars[groups['wazuh_dashboard'][0]]['ansible_host'] | default('10.10.20.12') }}"
+              ip: "10.10.20.12"
         CFG
         rm -rf wazuh-certificates
         bash ./wazuh-certs-tool.sh -A
@@ -577,14 +577,14 @@
         src: "{{ wazuh_indexer_tools }}/wazuh-certificates/{{ item }}"
         dest: "/tmp/crczp-certs/"
         flat: true
-      delegate_to: "{{ groups['wazuh_indexer'][0] }}"
+      delegate_to: "wazuh-indexer"
       loop:
         - wazuh-dashboard.pem
         - wazuh-dashboard-key.pem
         - root-ca.pem
       when:
         - inventory_hostname.startswith('wazuh-dashboard')
-        - groups['wazuh_indexer'] | default([]) | length > 0
+        - "'wazuh-indexer' in groups['all']"
       failed_when: false
 
     - name: Dashboard - install the certificates
@@ -600,7 +600,7 @@
         - root-ca.pem
       when:
         - inventory_hostname.startswith('wazuh-dashboard')
-        - groups['wazuh_indexer'] | default([]) | length > 0
+        - "'wazuh-indexer' in groups['all']"
       failed_when: false
 
     - name: Dashboard - restart on HTTPS with indexer credentials
