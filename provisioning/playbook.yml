@@ -603,6 +603,29 @@
         - "'wazuh-indexer' in groups['all']"
       failed_when: false
 
+    - name: Dashboard - switch the config to HTTPS 443 now that certs exist
+      ansible.builtin.copy:
+        dest: "{{ wazuh_dashboard_conf }}"
+        content: |
+          server.host: "0.0.0.0"
+          server.port: 443
+          server.name: "wazuh-dashboard"
+          opensearch.hosts: ["https://{{ wazuh_indexer_ip }}:9200"]
+          opensearch.ssl.verificationMode: none
+          opensearch.username: "kibanaserver"
+          opensearch.password: "kibanaserver"
+          opensearch.requestHeadersWhitelist: [ authorization, securitytenant ]
+          server.ssl.enabled: true
+          server.ssl.certificate: {{ wazuh_dashboard_certs }}/wazuh-dashboard.pem
+          server.ssl.key: {{ wazuh_dashboard_certs }}/wazuh-dashboard-key.pem
+        owner: wazuh-dashboard
+        group: wazuh-dashboard
+        mode: "0640"
+      when:
+        - inventory_hostname.startswith('wazuh-dashboard')
+        - "'wazuh-indexer' in groups['all']"
+      failed_when: false
+
     - name: Dashboard - restart on HTTPS with indexer credentials
       ansible.builtin.systemd:
         name: wazuh-dashboard
